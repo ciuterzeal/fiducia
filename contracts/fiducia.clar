@@ -43,6 +43,8 @@
 (define-constant ERR-TRANSFER-FAILED u408)
 (define-constant ERR-INVALID-GOAL u409)
 (define-constant ERR-DEADLINE-TOO-FAR u410)
+(define-constant ERR-NO-DONATION u411)
+(define-constant ERR-REFUND-UNAVAILABLE u412)
 
 ;; Constants for validation
 (define-constant MIN-GOAL u1000000) ;; Minimum goal: 1 STX (in microSTX)
@@ -103,6 +105,7 @@
 (define-public (donate (id uint) (amount uint))
   (let (
     (campaign (map-get? campaigns id))
+    (donation-key {id: id, funder: tx-sender})
   )
     ;; Validate inputs
     (asserts! (is-valid-campaign-id id) (err ERR-NOT-FOUND))
@@ -110,25 +113,78 @@
     
     (match campaign
       data
-      (begin
-        ;; Additional validation with campaign data
-        (asserts! (< stacks-block-height (get deadline data)) (err ERR-CAMPAIGN-EXPIRED))
-        
-        ;; Process donation
-        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
-        (map-set campaigns id
-          {
-            creator: (get creator data),
-            goal: (get goal data),
-            raised: (+ (get raised data) amount),
-            deadline: (get deadline data),
-            claimed: (get claimed data)
-          }
+      (let (
+        (existing-donation (default-to {amount: u0} (map-get? donations donation-key)))
+      )
+        (begin
+          ;; Additional validation with campaign data
+          (asserts! (< stacks-block-height (get deadline data)) (err ERR-CAMPAIGN-EXPIRED))
+          
+          ;; Process donation
+          (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+          (map-set campaigns id
+            {
+              creator: (get creator data),
+              goal: (get goal data),
+              raised: (+ (get raised data) amount),
+              deadline: (get deadline data),
+              claimed: (get claimed data)
+            }
+          )
+          (map-set donations donation-key
+            {amount: (+ (get amount existing-donation) amount)}
+          )
+          (ok amount)
         )
-        (map-set donations {id: id, funder: tx-sender}
-          {amount: amount}
+      )
+      (err ERR-NOT-FOUND)
+    )
+  )
+)
+
+;; Request a refund from an unsuccessful campaign
+(define-public (request-refund (id uint))
+  (let (
+    (maybe-campaign (map-get? campaigns id))
+    (donation-key {id: id, funder: tx-sender})
+  )
+    (asserts! (is-valid-campaign-id id) (err ERR-NOT-FOUND))
+    
+    (match maybe-campaign
+      campaign
+      (let (
+        (now stacks-block-height)
+        (goal (get goal campaign))
+        (raised (get raised campaign))
+        (deadline (get deadline campaign))
+        (claimed (get claimed campaign))
+        (creator (get creator campaign))
+        (maybe-donation (map-get? donations donation-key))
+      )
+        (asserts! (>= now deadline) (err ERR-TOO-EARLY))
+        (asserts! (< raised goal) (err ERR-REFUND-UNAVAILABLE))
+        (match maybe-donation
+          donation
+          (let (
+            (amount (get amount donation))
+          )
+            (asserts! (> amount u0) (err ERR-NO-DONATION))
+            (asserts! (>= raised amount) (err ERR-REFUND-UNAVAILABLE))
+            (try! (stx-transfer? amount (as-contract tx-sender) tx-sender))
+            (map-set campaigns id
+              {
+                creator: creator,
+                goal: goal,
+                raised: (- raised amount),
+                deadline: deadline,
+                claimed: claimed
+              }
+            )
+            (map-delete donations donation-key)
+            (ok amount)
+          )
+          (err ERR-NO-DONATION)
         )
-        (ok amount)
       )
       (err ERR-NOT-FOUND)
     )
