@@ -20,7 +20,8 @@
     goal: uint,
     raised: uint,
     deadline: uint,
-    claimed: bool
+    claimed: bool,
+    finalized: bool
   }
 )
 
@@ -45,6 +46,8 @@
 (define-constant ERR-DEADLINE-TOO-FAR u410)
 (define-constant ERR-NO-DONATION u411)
 (define-constant ERR-REFUND-UNAVAILABLE u412)
+(define-constant ERR-ALREADY-FINALIZED u413)
+(define-constant ERR-OVERFUNDING u414)
 
 ;; Constants for validation
 (define-constant MIN-GOAL u1000000) ;; Minimum goal: 1 STX (in microSTX)
@@ -92,7 +95,8 @@
           goal: goal,
           raised: u0,
           deadline: deadline,
-          claimed: false
+          claimed: false,
+          finalized: false
         }
       )
       (var-set campaign-counter (+ id u1))
@@ -115,20 +119,29 @@
       data
       (let (
         (existing-donation (default-to {amount: u0} (map-get? donations donation-key)))
+        (goal (get goal data))
+        (raised (get raised data))
+        (deadline (get deadline data))
+        (claimed (get claimed data))
+        (finalized (get finalized data))
+        (new-raised (+ raised amount))
       )
         (begin
           ;; Additional validation with campaign data
-          (asserts! (< stacks-block-height (get deadline data)) (err ERR-CAMPAIGN-EXPIRED))
+          (asserts! (< stacks-block-height deadline) (err ERR-CAMPAIGN-EXPIRED))
+          (asserts! (not finalized) (err ERR-ALREADY-FINALIZED))
+          (asserts! (<= new-raised goal) (err ERR-OVERFUNDING))
           
           ;; Process donation
           (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
           (map-set campaigns id
             {
               creator: (get creator data),
-              goal: (get goal data),
-              raised: (+ (get raised data) amount),
-              deadline: (get deadline data),
-              claimed: (get claimed data)
+              goal: goal,
+              raised: new-raised,
+              deadline: deadline,
+              claimed: claimed,
+              finalized: finalized
             }
           )
           (map-set donations donation-key
@@ -159,6 +172,7 @@
         (deadline (get deadline campaign))
         (claimed (get claimed campaign))
         (creator (get creator campaign))
+        (finalized (get finalized campaign))
         (maybe-donation (map-get? donations donation-key))
       )
         (asserts! (>= now deadline) (err ERR-TOO-EARLY))
@@ -177,7 +191,8 @@
                 goal: goal,
                 raised: (- raised amount),
                 deadline: deadline,
-                claimed: claimed
+                claimed: claimed,
+                finalized: finalized
               }
             )
             (map-delete donations donation-key)
@@ -208,11 +223,13 @@
         (deadline (get deadline data))
         (creator (get creator data))
         (claimed (get claimed data))
+        (finalized (get finalized data))
       )
         ;; Validate conditions
         (asserts! (is-eq tx-sender creator) (err ERR-UNAUTHORIZED))
         (asserts! (>= now deadline) (err ERR-TOO-EARLY))
         (asserts! (>= raised goal) (err ERR-GOAL-NOT-MET))
+        (asserts! (not finalized) (err ERR-ALREADY-FINALIZED))
         (asserts! (not claimed) (err ERR-ALREADY-CLAIMED))
         
         ;; Process claim
@@ -223,11 +240,68 @@
             goal: goal,
             raised: raised,
             deadline: deadline,
-            claimed: true
+            claimed: true,
+            finalized: true
           }
         )
         (unwrap-panic (update-claim-count creator))
         (ok true)
+      )
+      (err ERR-NOT-FOUND)
+    )
+  )
+)
+
+;; Finalize campaign outcome after the deadline
+(define-public (finalize-campaign (id uint))
+  (let (
+    (maybe-campaign (map-get? campaigns id))
+  )
+    (asserts! (is-valid-campaign-id id) (err ERR-NOT-FOUND))
+    
+    (match maybe-campaign
+      data
+      (let (
+        (now stacks-block-height)
+        (goal (get goal data))
+        (raised (get raised data))
+        (deadline (get deadline data))
+        (creator (get creator data))
+        (claimed (get claimed data))
+        (finalized (get finalized data))
+      )
+        (asserts! (>= now deadline) (err ERR-TOO-EARLY))
+        (asserts! (not finalized) (err ERR-ALREADY-FINALIZED))
+        (if (>= raised goal)
+          (begin
+            (try! (as-contract (stx-transfer? raised tx-sender creator)))
+            (map-set campaigns id
+              {
+                creator: creator,
+                goal: goal,
+                raised: raised,
+                deadline: deadline,
+                claimed: true,
+                finalized: true
+              }
+            )
+            (unwrap-panic (update-claim-count creator))
+            (ok true)
+          )
+          (begin
+            (map-set campaigns id
+              {
+                creator: creator,
+                goal: goal,
+                raised: raised,
+                deadline: deadline,
+                claimed: claimed,
+                finalized: true
+              }
+            )
+            (ok false)
+          )
+        )
       )
       (err ERR-NOT-FOUND)
     )
