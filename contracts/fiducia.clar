@@ -181,10 +181,11 @@
           donation
           (let (
             (amount (get amount donation))
+            (recipient tx-sender)
           )
             (asserts! (> amount u0) (err ERR-NO-DONATION))
             (asserts! (>= raised amount) (err ERR-REFUND-UNAVAILABLE))
-            (try! (stx-transfer? amount (as-contract tx-sender) tx-sender))
+            (try! (as-contract (stx-transfer? amount tx-sender recipient)))
             (map-set campaigns id
               {
                 creator: creator,
